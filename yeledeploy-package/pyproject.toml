@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yeledeploy"
+version = "1.0.0"
+description = "Automated Django deployment tool for EC2 with PostgreSQL, Nginx, and Gunicorn"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Chris Okoth", email = "chris@yelegroup.africa"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Installation/Setup",
+]
+dependencies = [
+    "click>=8.0.0",
+    "colorama>=0.4.0",
+    "psycopg2-binary>=2.9.0",
+    "jinja2>=3.0.0",
+    "django>=3.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/chrisokoth/ops-toolkit/yeledeploy"
+Repository = "https://github.com/chrisokoth/ops-toolkit/yeledeploy"
+Issues = "https://github.com/chrisokoth/ops-toolkit/yeledeploy/issues"
+
+[project.scripts]
+yeledeploy = "yeledeploy.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["yeledeploy*"]
+
+[tool.setuptools.package-data]
+yeledeploy = ["templates/*"]
