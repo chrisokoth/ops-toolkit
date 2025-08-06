@@ -84,18 +84,11 @@ cleanup_deployment() {
         rm -rf "$PROJECT_PATH/venv"
     fi
     
-    # Remove generated files
-    if [ -n "$PROJECT_PATH" ]; then
-        rm -f "$PROJECT_PATH/.env"
-        rm -f "$PROJECT_PATH/gunicorn.conf.py"
-        rm -f "$PROJECT_PATH/deploy_update.sh"
-        rm -f "$PROJECT_PATH/monitor_logs.sh"
-    fi
-    
     # Clean up frontend if configured
     if [ -n "$FRONTEND_APP_NAME" ]; then
         sudo rm -f /etc/nginx/sites-available/$FRONTEND_APP_NAME
         sudo rm -f /etc/nginx/sites-enabled/$FRONTEND_APP_NAME
+        sudo rm -rf /var/www/$FRONTEND_DOMAIN
     fi
     
     sudo systemctl daemon-reload
@@ -138,7 +131,7 @@ except Exception as e:
 
 print_header "Django EC2 Auto Deployment Script"
 echo "This script will automate your Django deployment on EC2"
-echo "Make sure you've cloned your Django project in the current directory"
+echo "Run this script from your home directory (where your Django and frontend projects are located)"
 echo ""
 
 # =============================================================================
@@ -147,22 +140,22 @@ echo ""
 
 print_header "Configuration Setup"
 
-# Get current directory name as default app name
-current_dir=$(basename "$PWD")
+# List available directories
+echo "Available directories in $(pwd):"
+ls -la | grep "^d" | awk '{print $9}' | grep -v "^\.$\|^\..$"
+echo ""
 
 prompt_input "Enter your app name (used for service names, logs, etc)" "APP_NAME" "This will be used to name all services (gunicorn-$APP_NAME, etc.)"
 
-prompt_input "Enter your domain name (e.g., api.example.com)" "DOMAIN_NAME" "This is the domain that will serve your Django app"
+prompt_input "Enter your backend domain name (e.g., api.example.com)" "DOMAIN_NAME" "This is the domain that will serve your Django app"
 
-prompt_input "Enter your Django project directory name (where manage.py is located)" "PROJECT_DIR" "The directory containing your Django project (usually the repo name)"
+prompt_input "Enter your Django project directory name (the folder containing manage.py)" "PROJECT_DIR" "The directory containing your Django project (e.g., Eduteka-Backend)"
 
-prompt_input "Enter your Django project module name (for WSGI)" "DJANGO_PROJECT" "The Django project module name (the directory containing wsgi.py)"
+prompt_input "Enter your Django project module name (for WSGI)" "DJANGO_PROJECT" "The Django project module name (e.g., eduteka_project)"
 
 prompt_input "Enter PostgreSQL database name" "DB_NAME" "Database name that will be created for your app"
 
 prompt_input "Enter PostgreSQL database password" "DB_PASSWORD" "Password for the postgres user to access the database"
-
-prompt_input "Enter Django URLs module path (e.g., myproject.urls or api.urls)" "DJANGO_URLS_MODULE" "The path to your Django URLs configuration for proper routing"
 
 # Environment Variables Configuration
 print_header "Environment Variables Configuration"
@@ -181,7 +174,13 @@ if [[ $use_env_file == "y" || $use_env_file == "Y" ]]; then
     echo "----------------------------------------"
     
     # Read multiline input until EOF
-    ENV_CONTENT=$(cat)
+    ENV_CONTENT=""
+    while IFS= read -r line; do
+        ENV_CONTENT="$ENV_CONTENT$line"$'\n'
+    done
+    
+    # Remove the last newline if present
+    ENV_CONTENT="${ENV_CONTENT%$'\n'}"
     
     print_status "Environment variables captured successfully!"
 else
@@ -210,10 +209,9 @@ fi
 # Confirm settings
 print_header "Configuration Summary"
 echo "App Name: $APP_NAME"
-echo "Domain: $DOMAIN_NAME"
+echo "Backend Domain: $DOMAIN_NAME"
 echo "Project Directory: $PROJECT_DIR"
 echo "Django Project Module: $DJANGO_PROJECT"
-echo "Django URLs Module: $DJANGO_URLS_MODULE"
 echo "Database Name: $DB_NAME"
 echo "Database Password: $DB_PASSWORD"
 echo "Environment Variables: $(echo "$ENV_CONTENT" | wc -l) lines configured"
@@ -225,9 +223,22 @@ if [[ $confirm != "y" && $confirm != "Y" ]]; then
     exit 1
 fi
 
-# Set paths
-PROJECT_PATH="/home/ubuntu/$PROJECT_DIR"
+# Set paths - Use current directory as base
+CURRENT_DIR=$(pwd)
+PROJECT_PATH="$CURRENT_DIR/$PROJECT_DIR"
 VENV_PATH="$PROJECT_PATH/venv"
+
+# Verify project directory exists
+if [ ! -d "$PROJECT_PATH" ]; then
+    print_error "Project directory '$PROJECT_PATH' does not exist!"
+    exit 1
+fi
+
+# Verify manage.py exists
+if [ ! -f "$PROJECT_PATH/manage.py" ]; then
+    print_error "manage.py not found in '$PROJECT_PATH'!"
+    exit 1
+fi
 
 # =============================================================================
 # SYSTEM UPDATES AND DEPENDENCIES
@@ -267,7 +278,7 @@ fi
 
 print_status "Checking if database '$DB_NAME' already exists..."
 export PGPASSWORD="$DB_PASSWORD"
-DB_EXISTS=$(psql -h localhost -U postgres -lqt 2>/dev/null | cut -d \| -f 1 | grep -w "$DB_NAME" | wc -l)
+DB_EXISTS=$(sudo -u postgres psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -w "$DB_NAME" | wc -l)
 
 if [ "$DB_EXISTS" -gt 0 ]; then
     print_warning "Database '$DB_NAME' already exists!"
@@ -403,7 +414,7 @@ if ! python manage.py migrate; then
     exit 1
 fi
 
-print_status "Collecting static files (including Swagger docs)..."
+print_status "Collecting static files..."
 if ! python manage.py collectstatic --noinput; then
     print_error "Static files collection failed!"
     exit 1
@@ -417,8 +428,8 @@ print_header "Configuring Gunicorn"
 
 print_status "Creating Gunicorn configuration..."
 
-# Create the gunicorn configuration file using cat with proper escaping
-cat > gunicorn.conf.py << EOF
+# Create the gunicorn configuration file
+cat > /tmp/gunicorn.conf.py << EOF
 # Gunicorn configuration for ${APP_NAME}
 bind = "unix:/run/gunicorn/gunicorn-${APP_NAME}.sock"
 workers = 3
@@ -435,6 +446,10 @@ errorlog = "/var/log/gunicorn/${APP_NAME}-error.log"
 accesslog = "/var/log/gunicorn/${APP_NAME}-access.log"
 loglevel = "info"
 EOF
+
+# Copy the gunicorn config to project directory
+cp /tmp/gunicorn.conf.py "$PROJECT_PATH/"
+rm /tmp/gunicorn.conf.py
 
 if [ $? -ne 0 ]; then
     print_error "Failed to create Gunicorn configuration"
@@ -492,7 +507,7 @@ sudo rm -f /etc/nginx/sites-enabled/default
 
 print_status "Creating Nginx configuration for $APP_NAME..."
 sudo tee /etc/nginx/sites-available/$APP_NAME > /dev/null << EOF
-# HTTP Server
+# Backend HTTP Server
 server {
     listen 80;
     server_name $DOMAIN_NAME;
@@ -501,8 +516,24 @@ server {
     access_log /var/log/nginx/$APP_NAME.access.log;
     error_log /var/log/nginx/$APP_NAME.error.log;
     
-    # Swagger Documentation (served at /yele-docs)
-    location /yele-docs/ {
+    # Static files (served directly by nginx)
+    location /static/ {
+        alias $PROJECT_PATH/staticfiles/;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+    
+    # Media files (served directly by nginx)
+    location /media/ {
+        alias $PROJECT_PATH/media/;
+        expires 1y;
+        add_header Cache-Control "public";
+        access_log off;
+    }
+    
+    # Django admin documentation
+    location /yele-docs {
         proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -510,31 +541,10 @@ server {
         proxy_pass http://unix:/run/gunicorn/gunicorn-$APP_NAME.sock;
         proxy_read_timeout 90s;
         proxy_connect_timeout 90s;
+        proxy_redirect off;
     }
     
-    # API routes (all Django URLs)
-    location /api/ {
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_pass http://unix:/run/gunicorn/gunicorn-$APP_NAME.sock;
-        proxy_read_timeout 90s;
-        proxy_connect_timeout 90s;
-    }
-    
-    # Admin interface
-    location /admin/ {
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_pass http://unix:/run/gunicorn/gunicorn-$APP_NAME.sock;
-        proxy_read_timeout 90s;
-        proxy_connect_timeout 90s;
-    }
-    
-    # All other Django routes
+    # All Django routes (including admin, api, docs, etc.)
     location / {
         proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -543,20 +553,23 @@ server {
         proxy_pass http://unix:/run/gunicorn/gunicorn-$APP_NAME.sock;
         proxy_read_timeout 90s;
         proxy_connect_timeout 90s;
-    }
-    
-    # Static files
-    location /static/ {
-        alias $PROJECT_PATH/staticfiles/;
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-    
-    # Media files
-    location /media/ {
-        alias $PROJECT_PATH/media/;
-        expires 1y;
-        add_header Cache-Control "public";
+        proxy_redirect off;
+        
+        # CORS headers for API
+        add_header 'Access-Control-Allow-Origin' '*' always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'Accept,Authorization,Cache-Control,Content-Type,DNT,If-Modified-Since,Keep-Alive,Origin,User-Agent,X-Requested-With' always;
+        
+        # Handle preflight requests
+        if (\$request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' '*';
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS';
+            add_header 'Access-Control-Allow-Headers' 'Accept,Authorization,Cache-Control,Content-Type,DNT,If-Modified-Since,Keep-Alive,Origin,User-Agent,X-Requested-With';
+            add_header 'Access-Control-Max-Age' 1728000;
+            add_header 'Content-Type' 'text/plain; charset=utf-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
     }
 }
 EOF
@@ -576,28 +589,6 @@ print_status "Testing Nginx configuration..."
 if ! sudo nginx -t; then
     print_error "Nginx configuration test failed!"
     exit 1
-fi
-
-# =============================================================================
-# SSL CERTIFICATE SETUP
-# =============================================================================
-
-print_header "Setting up SSL Certificate"
-
-print_status "Installing Certbot..."
-if ! sudo apt install -y certbot python3-certbot-nginx; then
-    print_error "Failed to install Certbot"
-    exit 1
-fi
-
-print_status "Obtaining SSL certificate for $DOMAIN_NAME..."
-if ! sudo certbot --nginx -d $DOMAIN_NAME --non-interactive --agree-tos --email admin@$DOMAIN_NAME; then
-    print_warning "SSL certificate installation failed. You can set it up manually later."
-    print_warning "Command: sudo certbot --nginx -d $DOMAIN_NAME"
-else
-    # Setup auto-renewal
-    print_status "Setting up SSL certificate auto-renewal..."
-    (sudo crontab -l 2>/dev/null; echo "0 12 * * * /usr/bin/certbot renew --quiet") | sudo crontab -
 fi
 
 # =============================================================================
@@ -685,17 +676,36 @@ else
 fi
 
 print_status "Testing application endpoint..."
+sleep 5  # Give services time to fully start
 if curl -s -o /dev/null -w "%{http_code}" "http://$DOMAIN_NAME/" | grep -q "200\|301\|302"; then
-    print_status "✓ Application is responding"
+    print_status "✓ Backend application is responding"
 else
-    print_warning "⚠ Application might not be responding correctly"
+    print_warning "⚠ Backend application might not be responding correctly"
+    print_status "Checking Gunicorn logs..."
+    sudo journalctl -u gunicorn-$APP_NAME.service --no-pager -n 10
 fi
 
-print_status "Testing Swagger documentation endpoint..."
-if curl -s -o /dev/null -w "%{http_code}" "http://$DOMAIN_NAME/yele-docs/" | grep -q "200\|301\|302"; then
-    print_status "✓ Swagger documentation is accessible at /yele-docs/"
+# =============================================================================
+# SSL CERTIFICATE SETUP
+# =============================================================================
+
+print_header "Setting up SSL Certificate"
+
+print_status "Installing Certbot..."
+if ! sudo apt install -y certbot python3-certbot-nginx; then
+    print_error "Failed to install Certbot"
+    exit 1
+fi
+
+print_status "Obtaining SSL certificate for $DOMAIN_NAME..."
+if ! sudo certbot --nginx -d $DOMAIN_NAME --email chris@yelegroup.africa --agree-tos --non-interactive --redirect; then
+    print_warning "SSL certificate installation failed. You can set it up manually later."
+    print_warning "Run manually: sudo certbot --nginx -d $DOMAIN_NAME"
 else
-    print_warning "⚠ Swagger documentation might not be accessible at /yele-docs/"
+    # Setup auto-renewal
+    print_status "Setting up SSL certificate auto-renewal..."
+    (sudo crontab -l 2>/dev/null; echo "0 12 * * * /usr/bin/certbot renew --quiet") | sudo crontab -
+    print_status "✓ SSL certificate installed successfully"
 fi
 
 # =============================================================================
@@ -705,7 +715,7 @@ fi
 print_header "Frontend Deployment Setup"
 
 echo ""
-echo "Backend deployment completed successfully! 🎉"
+echo "Backend deployment completed! 🎉"
 echo ""
 read -p "Do you want to deploy a React frontend as well? (y/n): " deploy_frontend
 
@@ -713,44 +723,27 @@ if [[ $deploy_frontend == "y" || $deploy_frontend == "Y" ]]; then
     
     print_header "Frontend Configuration"
     
-    # Check for React apps at the same level as backend
-    PARENT_DIR=$(dirname "$PROJECT_PATH")
-    echo "Scanning for React apps in: $PARENT_DIR"
-    
-    # Find directories with dist folder (built React apps)
-    REACT_APPS=()
-    for dir in "$PARENT_DIR"/*; do
-        if [ -d "$dir" ] && [ -d "$dir/dist" ] && [ "$dir" != "$PROJECT_PATH" ]; then
-            REACT_APPS+=("$(basename "$dir")")
+    # List available directories for frontend
+    echo "Available directories for frontend:"
+    for dir in "$CURRENT_DIR"/*; do
+        if [ -d "$dir" ] && [ "$dir" != "$PROJECT_PATH" ]; then
+            basename "$dir"
         fi
     done
+    echo ""
     
-    if [ ${#REACT_APPS[@]} -eq 0 ]; then
-        print_warning "No React apps with 'dist' folder found at the same level as backend"
-        print_warning "Make sure your React app is built (npm run build) and has a 'dist' folder"
-        read -p "Enter the frontend directory name manually: " FRONTEND_DIR
-        FRONTEND_PATH="$PARENT_DIR/$FRONTEND_DIR"
-        
-        if [ ! -d "$FRONTEND_PATH/dist" ]; then
-            print_error "Frontend directory '$FRONTEND_PATH' or dist folder doesn't exist"
-            print_warning "Skipping frontend deployment"
-            deploy_frontend="n"
-        fi
-    else
-        echo "Found React apps with dist folders:"
-        for i in "${!REACT_APPS[@]}"; do
-            echo "$((i+1)). ${REACT_APPS[i]}"
-        done
-        echo ""
-        read -p "Select frontend app (1-${#REACT_APPS[@]}): " app_choice
-        
-        if [[ $app_choice -ge 1 && $app_choice -le ${#REACT_APPS[@]} ]]; then
-            FRONTEND_DIR="${REACT_APPS[$((app_choice-1))]}"
-            FRONTEND_PATH="$PARENT_DIR/$FRONTEND_DIR"
-        else
-            print_error "Invalid selection"
-            deploy_frontend="n"
-        fi
+    prompt_input "Enter frontend directory name" "FRONTEND_DIR" "The directory containing your React app with dist folder"
+    
+    FRONTEND_PATH="$CURRENT_DIR/$FRONTEND_DIR"
+    
+    # Verify frontend directory and dist folder exist
+    if [ ! -d "$FRONTEND_PATH" ]; then
+        print_error "Frontend directory '$FRONTEND_PATH' does not exist!"
+        deploy_frontend="n"
+    elif [ ! -d "$FRONTEND_PATH/dist" ]; then
+        print_error "dist folder not found in '$FRONTEND_PATH'!"
+        print_warning "Make sure to run 'npm run build' in your React app"
+        deploy_frontend="n"
     fi
     
     if [[ $deploy_frontend == "y" || $deploy_frontend == "Y" ]]; then
@@ -760,11 +753,16 @@ if [[ $deploy_frontend == "y" || $deploy_frontend == "Y" ]]; then
         
         print_header "Deploying React Frontend"
         
+        # Create web directory and copy files
+        print_status "Setting up frontend files..."
+        sudo mkdir -p /var/www/$FRONTEND_DOMAIN
+        sudo cp -r "$FRONTEND_PATH/dist"/* /var/www/$FRONTEND_DOMAIN/
+        
         print_status "Configuring Nginx for React frontend..."
         
-        # Create nginx configuration for frontend
+        # Create nginx configuration for frontend with backend proxy
         sudo tee /etc/nginx/sites-available/$FRONTEND_APP_NAME > /dev/null << EOF
-# React Frontend Configuration
+# React Frontend Configuration with Backend Proxy
 server {
     listen 80;
     server_name $FRONTEND_DOMAIN;
@@ -774,16 +772,11 @@ server {
     error_log /var/log/nginx/$FRONTEND_APP_NAME.error.log;
     
     # Root directory for React build files
-    root $FRONTEND_PATH/dist;
+    root /var/www/$FRONTEND_DOMAIN;
     index index.html;
     
-    # Handle React Router (SPA routing)
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-    
-    # API proxy to backend
-    location /api/ {
+    # Backend API proxy - proxy ALL backend routes
+    location ~ ^/(admin|api|docs|swagger|auth|accounts|yele-docs)/ {
         proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -791,49 +784,57 @@ server {
         proxy_pass http://unix:/run/gunicorn/gunicorn-$APP_NAME.sock;
         proxy_read_timeout 90s;
         proxy_connect_timeout 90s;
+        proxy_redirect off;
+        
+        # CORS headers for API
+        add_header 'Access-Control-Allow-Origin' '*' always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'Accept,Authorization,Cache-Control,Content-Type,DNT,If-Modified-Since,Keep-Alive,Origin,User-Agent,X-Requested-With' always;
+        
+        # Handle preflight requests
+        if (\$request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' '*';
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS';
+            add_header 'Access-Control-Allow-Headers' 'Accept,Authorization,Cache-Control,Content-Type,DNT,If-Modified-Since,Keep-Alive,Origin,User-Agent,X-Requested-With';
+            add_header 'Access-Control-Max-Age' 1728000;
+            add_header 'Content-Type' 'text/plain; charset=utf-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
     }
     
-    # Swagger docs proxy to backend
-    location /yele-docs/ {
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_pass http://unix:/run/gunicorn/gunicorn-$APP_NAME.sock;
-        proxy_read_timeout 90s;
-        proxy_connect_timeout 90s;
-    }
-    
-    # Admin interface proxy to backend
-    location /admin/ {
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_pass http://unix:/run/gunicorn/gunicorn-$APP_NAME.sock;
-        proxy_read_timeout 90s;
-        proxy_connect_timeout 90s;
-    }
-    
-    # Static files for backend
+    # Backend static files proxy
     location /static/ {
         alias $PROJECT_PATH/staticfiles/;
         expires 1y;
         add_header Cache-Control "public, immutable";
+        access_log off;
     }
     
-    # Media files for backend
+    # Backend media files proxy
     location /media/ {
         alias $PROJECT_PATH/media/;
         expires 1y;
         add_header Cache-Control "public";
+        access_log off;
     }
     
-    # Cache static assets
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+    # Frontend static assets (JS, CSS, images, etc.)
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|map)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
         access_log off;
+        try_files \$uri =404;
+    }
+    
+    # Handle React Router (SPA routing) - must be last
+    location / {
+        try_files \$uri \$uri/ /index.html;
+        
+        # Security headers
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
     }
 }
 EOF
@@ -844,8 +845,8 @@ EOF
         fi
         
         print_status "Setting frontend directory permissions..."
-        sudo chown -R ubuntu:www-data "$FRONTEND_PATH/dist"
-        sudo chmod -R 755 "$FRONTEND_PATH/dist"
+        sudo chown -R www-data:www-data /var/www/$FRONTEND_DOMAIN
+        sudo chmod -R 755 /var/www/$FRONTEND_DOMAIN
         
         print_status "Enabling frontend Nginx site..."
         if ! sudo ln -sf /etc/nginx/sites-available/$FRONTEND_APP_NAME /etc/nginx/sites-enabled/; then
@@ -868,18 +869,22 @@ EOF
         print_header "Setting up SSL for Frontend"
         
         print_status "Obtaining SSL certificate for $FRONTEND_DOMAIN..."
-        if ! sudo certbot --nginx -d $FRONTEND_DOMAIN --non-interactive --agree-tos --email admin@$FRONTEND_DOMAIN; then
+        if ! sudo certbot --nginx -d $FRONTEND_DOMAIN --email chris@yelegroup.africa --agree-tos --non-interactive --redirect; then
             print_warning "Frontend SSL certificate installation failed. You can set it up manually later."
-            print_warning "Command: sudo certbot --nginx -d $FRONTEND_DOMAIN"
+            print_warning "Run manually: sudo certbot --nginx -d $FRONTEND_DOMAIN"
+        else
+            print_status "✓ Frontend SSL certificate installed successfully"
         fi
         
         print_header "Verifying Frontend Deployment"
         
         print_status "Testing frontend endpoint..."
+        sleep 3  # Give nginx time to reload
         if curl -s -o /dev/null -w "%{http_code}" "http://$FRONTEND_DOMAIN/" | grep -q "200\|301\|302"; then
             print_status "✓ Frontend is responding"
         else
             print_warning "⚠ Frontend might not be responding correctly"
+            print_warning "Check nginx logs: sudo tail -f /var/log/nginx/$FRONTEND_APP_NAME.error.log"
         fi
         
         FRONTEND_DEPLOYED=true
@@ -896,14 +901,17 @@ fi
 print_header "Creating Deployment Utilities"
 
 print_status "Creating deployment update script..."
-cat > deploy_update.sh << EOF
+cat > /tmp/deploy_update.sh << 'EOF'
 #!/bin/bash
 # Auto-update deployment script
 
-APP_NAME="$APP_NAME"
-PROJECT_PATH="$PROJECT_PATH"
+APP_NAME="APP_NAME_PLACEHOLDER"
+PROJECT_PATH="PROJECT_PATH_PLACEHOLDER"
+FRONTEND_DEPLOYED=FRONTEND_DEPLOYED_PLACEHOLDER
+FRONTEND_PATH="FRONTEND_PATH_PLACEHOLDER"
+FRONTEND_DOMAIN="FRONTEND_DOMAIN_PLACEHOLDER"
 
-cd "\$PROJECT_PATH"
+cd "$PROJECT_PATH"
 
 echo "Pulling latest changes..."
 git pull origin main
@@ -921,7 +929,7 @@ echo "Collecting static files..."
 python manage.py collectstatic --noinput
 
 echo "Restarting services..."
-sudo systemctl restart gunicorn-\$APP_NAME.service
+sudo systemctl restart gunicorn-$APP_NAME.service
 
 echo "Backend deployment update completed!"
 
@@ -930,46 +938,64 @@ if [ "$FRONTEND_DEPLOYED" = true ]; then
     echo ""
     echo "Frontend detected. To update frontend:"
     echo "1. Rebuild your React app (npm run build)"
-    echo "2. Upload the new dist folder to: $FRONTEND_PATH/"
-    echo "3. Set permissions: sudo chown -R ubuntu:www-data $FRONTEND_PATH/dist && sudo chmod -R 755 $FRONTEND_PATH/dist"
+    echo "2. Copy new files: sudo cp -r $FRONTEND_PATH/dist/* /var/www/$FRONTEND_DOMAIN/"
+    echo "3. Set permissions: sudo chown -R www-data:www-data /var/www/$FRONTEND_DOMAIN"
 fi
 EOF
 
-chmod +x deploy_update.sh
+# Replace placeholders with actual values
+sed -i "s|APP_NAME_PLACEHOLDER|$APP_NAME|g" /tmp/deploy_update.sh
+sed -i "s|PROJECT_PATH_PLACEHOLDER|$PROJECT_PATH|g" /tmp/deploy_update.sh
+sed -i "s|FRONTEND_DEPLOYED_PLACEHOLDER|$FRONTEND_DEPLOYED|g" /tmp/deploy_update.sh
+if [ "$FRONTEND_DEPLOYED" = true ]; then
+    sed -i "s|FRONTEND_PATH_PLACEHOLDER|$FRONTEND_PATH|g" /tmp/deploy_update.sh
+    sed -i "s|FRONTEND_DOMAIN_PLACEHOLDER|$FRONTEND_DOMAIN|g" /tmp/deploy_update.sh
+fi
+
+# Copy to project directory and make executable
+cp /tmp/deploy_update.sh "$PROJECT_PATH/"
+chmod +x "$PROJECT_PATH/deploy_update.sh"
+rm /tmp/deploy_update.sh
 
 print_status "Creating log monitoring script..."
-cat > monitor_logs.sh << EOF
+cat > /tmp/monitor_logs.sh << 'EOF'
 #!/bin/bash
-# Log monitoring script for $APP_NAME
+# Log monitoring script for APP_NAME_PLACEHOLDER
 
-echo "=== $APP_NAME Log Monitor ==="
+echo "=== APP_NAME_PLACEHOLDER Log Monitor ==="
 echo "Press Ctrl+C to stop"
 echo "=========================="
 
 # Monitor Gunicorn access logs with color coding
-tail -f /var/log/gunicorn/$APP_NAME-access.log | while read line; do
-    timestamp=\$(echo "\$line" | awk '{print \$1, \$2}')
-    request=\$(echo "\$line" | grep -o '"[^"]*"' | head -1)
-    status=\$(echo "\$line" | awk '{print \$9}')
+tail -f /var/log/gunicorn/APP_NAME_PLACEHOLDER-access.log | while read line; do
+    timestamp=$(echo "$line" | awk '{print $1, $2}')
+    request=$(echo "$line" | grep -o '"[^"]*"' | head -1)
+    status=$(echo "$line" | awk '{print $9}')
     
     # Color code based on status
-    if [[ \$status =~ ^2 ]]; then
+    if [[ $status =~ ^2 ]]; then
         color="\033[32m"  # Green for 2xx
-    elif [[ \$status =~ ^3 ]]; then
+    elif [[ $status =~ ^3 ]]; then
         color="\033[33m"  # Yellow for 3xx
-    elif [[ \$status =~ ^4 ]]; then
+    elif [[ $status =~ ^4 ]]; then
         color="\033[31m"  # Red for 4xx
-    elif [[ \$status =~ ^5 ]]; then
+    elif [[ $status =~ ^5 ]]; then
         color="\033[35m"  # Magenta for 5xx
     else
         color="\033[0m"   # Default
     fi
     
-    echo -e "\${color}[\$timestamp] \$status \$request\033[0m"
+    echo -e "${color}[$timestamp] $status $request\033[0m"
 done
 EOF
 
-chmod +x monitor_logs.sh
+# Replace placeholders
+sed -i "s|APP_NAME_PLACEHOLDER|$APP_NAME|g" /tmp/monitor_logs.sh
+
+# Copy to project directory and make executable
+cp /tmp/monitor_logs.sh "$PROJECT_PATH/"
+chmod +x "$PROJECT_PATH/monitor_logs.sh"
+rm /tmp/monitor_logs.sh
 
 # =============================================================================
 # DEPLOYMENT SUMMARY
@@ -985,25 +1011,26 @@ echo "🎉 Your Django application has been successfully deployed!"
 echo ""
 echo "📋 Backend Deployment Summary:"
 echo "   • App Name: $APP_NAME"
-echo "   • Domain: http://$DOMAIN_NAME (https after SSL setup)"
+echo "   • Domain: https://$DOMAIN_NAME"
 echo "   • Project Path: $PROJECT_PATH"
 echo "   • Database: $DB_NAME"
-echo "   • Swagger Docs: http://$DOMAIN_NAME/yele-docs/"
+echo "   • Swagger Docs: https://$DOMAIN_NAME/yele-docs"
 echo ""
 
 if [ "$FRONTEND_DEPLOYED" = true ]; then
     echo "📋 Frontend Deployment Summary:"
-    echo "   • Frontend Domain: http://$FRONTEND_DOMAIN (https after SSL setup)"
-    echo "   • Frontend Path: $FRONTEND_PATH/dist"
+    echo "   • Frontend Domain: https://$FRONTEND_DOMAIN"
+    echo "   • Frontend Path: /var/www/$FRONTEND_DOMAIN"
     echo "   • Frontend Config: $FRONTEND_APP_NAME"
+    echo "   • API Access: https://$FRONTEND_DOMAIN/yele-docs"
     echo ""
 fi
 
 echo "🔧 Service Management Commands:"
 echo "   • Restart Backend: sudo systemctl restart gunicorn-$APP_NAME.service"
 echo "   • View Backend Logs: sudo journalctl -u gunicorn-$APP_NAME.service -f"
-echo "   • Monitor Requests: ./monitor_logs.sh"
-echo "   • Update Deployment: ./deploy_update.sh"
+echo "   • Monitor Requests: cd $PROJECT_PATH && ./monitor_logs.sh"
+echo "   • Update Deployment: cd $PROJECT_PATH && ./deploy_update.sh"
 echo ""
 echo "📁 Important Files Created:"
 echo "   • Gunicorn Service: /etc/systemd/system/gunicorn-$APP_NAME.service"
@@ -1022,20 +1049,21 @@ fi
 
 echo ""
 echo "🔗 Quick Tests:"
-echo "   • Backend API: http://$DOMAIN_NAME"
-echo "   • Admin Panel: http://$DOMAIN_NAME/admin/"
-echo "   • Swagger Docs: http://$DOMAIN_NAME/yele-docs/"
+echo "   • Backend API: https://$DOMAIN_NAME"
+echo "   • Admin Panel: https://$DOMAIN_NAME/admin/"
+echo "   • API Documentation: https://$DOMAIN_NAME/yele-docs"
 
 if [ "$FRONTEND_DEPLOYED" = true ]; then
-    echo "   • Frontend App: http://$FRONTEND_DOMAIN"
+    echo "   • Frontend App: https://$FRONTEND_DOMAIN"
+    echo "   • API from Frontend: https://$FRONTEND_DOMAIN/yele-docs"
 fi
 
 echo ""
 echo "📝 Next Steps:"
-echo "   1. Create Django superuser: python manage.py createsuperuser"
-echo "   2. Update your .env file with actual API keys"
-echo "   3. Test all endpoints and frontend functionality"
-echo "   4. Set up SSL certificates if they failed"
+echo "   1. Create Django superuser: cd $PROJECT_PATH && source venv/bin/activate && python manage.py createsuperuser"
+echo "   2. Test all endpoints including /yele-docs"
+echo "   3. Verify SSL certificates are working"
+echo "   4. Update your environment variables if needed"
 
 if [ "$FRONTEND_DEPLOYED" = true ]; then
     echo "   5. Test API connectivity from frontend"
@@ -1044,16 +1072,28 @@ fi
 
 echo ""
 
-print_warning "Remember to:"
-print_warning "• Update your .env file with production API keys"
-print_warning "• Create a Django superuser account"
-print_warning "• Set up regular database backups"
-print_warning "• Monitor application logs regularly"
+print_warning "Important Notes:"
+print_warning "• The script does not modify your repository code"
+print_warning "• All necessary configurations are done in system files only"
+print_warning "• Your /yele-docs route should work if properly configured in your Django app"
+print_warning "• SSL certificates are automatically configured"
 
 if [ "$FRONTEND_DEPLOYED" = true ]; then
-    print_warning "• Test frontend-backend API connectivity"
-    print_warning "• Verify all React routes work correctly"
+    print_warning "• Frontend proxies backend routes including /yele-docs"
 fi
 
+echo ""
+echo "🚨 Troubleshooting Commands:"
+echo "   • Check backend status: sudo systemctl status gunicorn-$APP_NAME.service"
+echo "   • Check nginx status: sudo systemctl status nginx"
+echo "   • Check backend logs: sudo journalctl -u gunicorn-$APP_NAME.service -n 50"
+echo "   • Check nginx error logs: sudo tail -f /var/log/nginx/$APP_NAME.error.log"
+
+if [ "$FRONTEND_DEPLOYED" = true ]; then
+    echo "   • Check frontend logs: sudo tail -f /var/log/nginx/$FRONTEND_APP_NAME.error.log"
+fi
+
+echo "   • Test socket connection: curl --unix-socket /run/gunicorn/gunicorn-$APP_NAME.sock http://localhost/"
+echo "   • Test /yele-docs: curl -I https://$DOMAIN_NAME/yele-docs"
 echo ""
 print_status "Deployment script completed successfully! 🚀"
