@@ -372,8 +372,8 @@ if ! pip install -r requirements.txt; then
     exit 1
 fi
 
-if ! pip install gunicorn psycopg2-binary; then
-    print_error "Failed to install gunicorn and psycopg2"
+if ! pip install gunicorn psycopg2-binary setuptools; then
+    print_error "Failed to install gunicorn, psycopg2, and setuptools"
     exit 1
 fi
 
@@ -384,14 +384,8 @@ fi
 print_header "Configuring Django Application"
 
 print_status "Creating .env file..."
-# Generate Django secret key
-DJANGO_SECRET_KEY=$(python3 -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())")
-
-# Create the .env file with user's content plus generated values
+# Create the .env file with user's content only (no SECRET_KEY generation)
 cat > .env << EOF
-# Generated Django Secret Key
-SECRET_KEY=$DJANGO_SECRET_KEY
-
 $ENV_CONTENT
 EOF
 
@@ -580,7 +574,12 @@ if [ $? -ne 0 ]; then
 fi
 
 print_status "Enabling Nginx site..."
-if ! sudo ln -sf /etc/nginx/sites-available/$APP_NAME /etc/nginx/sites-enabled/; then
+# Remove any existing link or directory first
+sudo rm -f /etc/nginx/sites-enabled/$APP_NAME
+sudo rm -rf /etc/nginx/sites-enabled/sites-available
+
+# Create the symbolic link
+if ! sudo ln -s /etc/nginx/sites-available/$APP_NAME /etc/nginx/sites-enabled/$APP_NAME; then
     print_error "Failed to enable Nginx site"
     exit 1
 fi
