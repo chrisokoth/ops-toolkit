@@ -1,0 +1,56 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install dependencies and build
+        run: |
+          npm install
+          npm run build
+
+      - name: Sync files to server
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          USERNAME: ${{ secrets.USERNAME }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          echo "Will connect to: ${USERNAME}@${SERVER_IP}"
+
+          # Create a directory for built files on the server
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa "${USERNAME}@${SERVER_IP}" "mkdir -p ~/yelechat/dist"
+
+          # Rsync only the dist directory to the server
+          rsync -avz -e "ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa" ./dist/ "${USERNAME}@${SERVER_IP}:~/yelechat/dist/"
+
+      - name: Deploy to Web Root
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          USERNAME: ${{ secrets.USERNAME }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa "${USERNAME}@${SERVER_IP}" << EOF
+          sudo rm -rf /var/www/yelechat.com/*
+          sudo cp -r ~/yelechat/dist/* /var/www/yelechat.com/
+          sudo systemctl reload nginx
+          sudo systemctl restart nginx
+          echo "Deployment completed successfully!"
+          EOF

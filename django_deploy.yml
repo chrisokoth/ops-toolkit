@@ -1,0 +1,41 @@
+name: Deploy Django to Server
+on:
+  push:
+    branches:
+      - main
+env:
+  APP_NAME: Yelechat-Backend  # Change this for each app
+  SERVICE_NAME: gunicorn-yelechat.service  # Change this for each app
+  
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        
+      - name: Sync files to server
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          USERNAME: ${{ secrets.USERNAME }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "Will connect to: ${USERNAME}@${SERVER_IP}"
+          # Sync files to existing app directory
+          rsync -avz -e "ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa" --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' ./ "${USERNAME}@${SERVER_IP}:~/${{ env.APP_NAME }}/"
+          
+      - name: Install dependencies and restart service
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          USERNAME: ${{ secrets.USERNAME }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa "${USERNAME}@${SERVER_IP}" << EOF
+          cd ~/${{ env.APP_NAME }}
+          pip install -r requirements.txt
+          sudo systemctl restart ${{ env.SERVICE_NAME }}
+          echo "Deployment of ${{ env.APP_NAME }} completed successfully!"
+          EOF
