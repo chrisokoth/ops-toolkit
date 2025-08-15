@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Django EC2 Auto Deployment Script with Frontend Support and Advanced Features
+# Django EC2 Auto Deployment Script with Frontend Support
 # Author: Automated Django Deployment
-# Description: Automates Django deployment on EC2 with Gunicorn, Nginx, PostgreSQL, optional React frontend, and advanced DevOps features
+# Description: Automates Django deployment on EC2 with Gunicorn, Nginx, PostgreSQL and optional React frontend
 
 # Colors for output
 RED='\033[0;31m'
@@ -46,34 +46,9 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Function to send email notifications
-send_notification() {
-    local subject="$1"
-    local message="$2"
-    local email="chris@yelegroup.africa"
-    
-    # Try multiple methods to send email
-    if command_exists mail; then
-        echo "$message" | mail -s "$subject" "$email"
-    elif command_exists sendmail; then
-        {
-            echo "To: $email"
-            echo "Subject: $subject"
-            echo ""
-            echo "$message"
-        } | sendmail "$email"
-    else
-        # Log to syslog if email fails
-        logger "DEPLOYMENT NOTIFICATION: $subject - $message"
-    fi
-}
-
 # Cleanup function for deployment failure
 cleanup_deployment() {
     print_header "Cleaning up failed deployment..."
-    
-    # Send failure notification
-    send_notification "Django Deployment Failed - $APP_NAME" "Deployment failed during setup. Cleanup initiated for app: $APP_NAME on server: $(hostname). Time: $(date)"
     
     # Stop and remove services
     if [ -n "$APP_NAME" ]; then
@@ -154,8 +129,8 @@ except Exception as e:
     return 0
 }
 
-print_header "Django EC2 Auto Deployment Script with Advanced Features"
-echo "This script will automate your Django deployment on EC2 with health monitoring, backups, and auto-scaling"
+print_header "Django EC2 Auto Deployment Script"
+echo "This script will automate your Django deployment on EC2"
 echo "Run this script from your home directory (where your Django and frontend projects are located)"
 echo ""
 
@@ -283,8 +258,8 @@ if ! sudo apt install -y python3 python3-pip python3-venv python3-dev build-esse
     exit 1
 fi
 
-print_status "Installing server components and monitoring tools..."
-if ! sudo apt install -y postgresql postgresql-contrib nginx git curl wget ccze multitail mailutils sysstat htop iftop; then
+print_status "Installing server components..."
+if ! sudo apt install -y postgresql postgresql-contrib nginx git curl wget ccze multitail; then
     print_error "Failed to install server components"
     exit 1
 fi
@@ -516,596 +491,6 @@ if [ $? -ne 0 ]; then
 fi
 
 # =============================================================================
-# HEALTH CHECK ENDPOINT SETUP
-# =============================================================================
-
-print_header "Setting up Health Check System"
-
-print_status "Creating health check script..."
-sudo mkdir -p /opt/monitoring/$APP_NAME
-
-sudo tee /opt/monitoring/$APP_NAME/health_check.py > /dev/null << EOF
-#!/usr/bin/env python3
-import requests
-import sys
-import json
-import subprocess
-import time
-from datetime import datetime
-
-APP_NAME = "$APP_NAME"
-DOMAIN = "$DOMAIN_NAME"
-EMAIL = "chris@yelegroup.africa"
-
-def send_email(subject, message):
-    try:
-        subprocess.run([
-            'mail', '-s', subject, EMAIL
-        ], input=message, text=True, check=True)
-    except:
-        subprocess.run([
-            'logger', f'HEALTH_CHECK: {subject} - {message}'
-        ])
-
-def check_health():
-    checks = {
-        'http_status': False,
-        'database': False,
-        'gunicorn': False,
-        'nginx': False,
-        'disk_space': False,
-        'memory': False
-    }
-    
-    # HTTP Status Check
-    try:
-        response = requests.get(f'https://{DOMAIN}/admin/', timeout=10)
-        checks['http_status'] = response.status_code in [200, 301, 302]
-    except:
-        checks['http_status'] = False
-    
-    # Service Checks
-    try:
-        result = subprocess.run(['systemctl', 'is-active', f'gunicorn-{APP_NAME}.service'], 
-                              capture_output=True, text=True)
-        checks['gunicorn'] = result.stdout.strip() == 'active'
-    except:
-        checks['gunicorn'] = False
-    
-    try:
-        result = subprocess.run(['systemctl', 'is-active', 'nginx'], 
-                              capture_output=True, text=True)
-        checks['nginx'] = result.stdout.strip() == 'active'
-    except:
-        checks['nginx'] = False
-    
-    # Database Check
-    try:
-        result = subprocess.run(['systemctl', 'is-active', 'postgresql'], 
-                              capture_output=True, text=True)
-        checks['database'] = result.stdout.strip() == 'active'
-    except:
-        checks['database'] = False
-    
-    # Disk Space Check (>10% free)
-    try:
-        result = subprocess.run(['df', '/', '--output=pcent'], capture_output=True, text=True)
-        usage = int(result.stdout.split()[-1].strip('%'))
-        checks['disk_space'] = usage < 90
-    except:
-        checks['disk_space'] = False
-    
-    # Memory Check (>10% free)
-    try:
-        result = subprocess.run(['free'], capture_output=True, text=True)
-        lines = result.stdout.split('\n')
-        mem_line = [l for l in lines if l.startswith('Mem:')][0].split()
-        total, used = int(mem_line[1]), int(mem_line[2])
-        usage_percent = (used / total) * 100
-        checks['memory'] = usage_percent < 90
-    except:
-        checks['memory'] = False
-    
-    # Generate report
-    failed_checks = [k for k, v in checks.items() if not v]
-    
-    if failed_checks:
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        subject = f"Health Check Failed - {APP_NAME}"
-        message = f"""
-Health check failed at {timestamp} on server {subprocess.run(['hostname'], capture_output=True, text=True).stdout.strip()}
-
-Failed checks: {', '.join(failed_checks)}
-
-All checks status:
-{json.dumps(checks, indent=2)}
-
-Please investigate immediately.
-        """
-        send_email(subject, message)
-        return False
-    
-    return True
-
-if __name__ == '__main__':
-    success = check_health()
-    sys.exit(0 if success else 1)
-EOF
-
-sudo chmod +x /opt/monitoring/$APP_NAME/health_check.py
-
-# Create health check cron job (every 5 minutes)
-print_status "Setting up health check cron job..."
-(crontab -l 2>/dev/null; echo "*/5 * * * * /opt/monitoring/$APP_NAME/health_check.py") | crontab -
-
-# =============================================================================
-# PERFORMANCE MONITORING SETUP
-# =============================================================================
-
-print_header "Setting up Performance Monitoring"
-
-print_status "Creating performance monitoring script..."
-sudo tee /opt/monitoring/$APP_NAME/performance_monitor.py > /dev/null << EOF
-#!/usr/bin/env python3
-import psutil
-import subprocess
-import time
-import json
-from datetime import datetime
-
-APP_NAME = "$APP_NAME"
-EMAIL = "chris@yelegroup.africa"
-
-# Thresholds
-CPU_THRESHOLD = 80
-MEMORY_THRESHOLD = 80
-DISK_THRESHOLD = 85
-LOAD_THRESHOLD = 4.0
-
-def send_alert(subject, message):
-    try:
-        subprocess.run([
-            'mail', '-s', subject, EMAIL
-        ], input=message, text=True, check=True)
-    except:
-        subprocess.run([
-            'logger', f'PERFORMANCE_ALERT: {subject} - {message}'
-        ])
-
-def check_performance():
-    alerts = []
-    
-    # CPU Usage
-    cpu_percent = psutil.cpu_percent(interval=1)
-    if cpu_percent > CPU_THRESHOLD:
-        alerts.append(f"High CPU usage: {cpu_percent:.1f}%")
-    
-    # Memory Usage
-    memory = psutil.virtual_memory()
-    if memory.percent > MEMORY_THRESHOLD:
-        alerts.append(f"High memory usage: {memory.percent:.1f}%")
-    
-    # Disk Usage
-    disk = psutil.disk_usage('/')
-    disk_percent = (disk.used / disk.total) * 100
-    if disk_percent > DISK_THRESHOLD:
-        alerts.append(f"High disk usage: {disk_percent:.1f}%")
-    
-    # Load Average
-    load_avg = psutil.getloadavg()[0]
-    if load_avg > LOAD_THRESHOLD:
-        alerts.append(f"High load average: {load_avg:.2f}")
-    
-    # Check gunicorn processes
-    gunicorn_processes = []
-    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
-        try:
-            if 'gunicorn' in proc.info['name'] and APP_NAME in ' '.join(proc.cmdline()):
-                gunicorn_processes.append(proc.info)
-        except:
-            pass
-    
-    if not gunicorn_processes:
-        alerts.append("No gunicorn processes found")
-    
-    if alerts:
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        hostname = subprocess.run(['hostname'], capture_output=True, text=True).stdout.strip()
-        
-        subject = f"Performance Alert - {APP_NAME}"
-        message = f"""
-Performance alert triggered at {timestamp} on server {hostname}
-
-Alerts:
-{chr(10).join(f"• {alert}" for alert in alerts)}
-
-Current metrics:
-• CPU: {cpu_percent:.1f}%
-• Memory: {memory.percent:.1f}%
-• Disk: {disk_percent:.1f}%
-• Load: {load_avg:.2f}
-• Gunicorn processes: {len(gunicorn_processes)}
-
-Please investigate performance issues.
-        """
-        send_alert(subject, message)
-
-if __name__ == '__main__':
-    check_performance()
-EOF
-
-sudo chmod +x /opt/monitoring/$APP_NAME/performance_monitor.py
-
-# Create performance monitoring cron job (every 10 minutes)
-print_status "Setting up performance monitoring cron job..."
-(crontab -l 2>/dev/null; echo "*/10 * * * * /opt/monitoring/$APP_NAME/performance_monitor.py") | crontab -
-
-# =============================================================================
-# DATABASE BACKUP SETUP
-# =============================================================================
-
-print_header "Setting up Database Backup System"
-
-print_status "Creating backup directory..."
-sudo mkdir -p /opt/backups/$APP_NAME/database
-sudo chown ubuntu:ubuntu /opt/backups/$APP_NAME/database
-
-print_status "Creating database backup script..."
-cat > /tmp/db_backup.sh << EOF
-#!/bin/bash
-APP_NAME="$APP_NAME"
-DB_NAME="$DB_NAME"
-DB_PASSWORD="$DB_PASSWORD"
-BACKUP_DIR="/opt/backups/\$APP_NAME/database"
-EMAIL="chris@yelegroup.africa"
-
-export PGPASSWORD="\$DB_PASSWORD"
-
-# Create timestamp
-TIMESTAMP=\$(date +"%Y%m%d_%H%M%S")
-BACKUP_FILE="\$BACKUP_DIR/\${DB_NAME}_\${TIMESTAMP}.sql"
-
-# Perform backup
-if pg_dump -h localhost -U postgres -d "\$DB_NAME" > "\$BACKUP_FILE"; then
-    gzip "\$BACKUP_FILE"
-    echo "Database backup completed: \${BACKUP_FILE}.gz"
-    
-    # Clean up old backups (keep last 7 days)
-    find "\$BACKUP_DIR" -name "*.sql.gz" -mtime +7 -delete
-    
-    # Send success notification (weekly)
-    if [ \$(date +%u) -eq 1 ]; then  # Monday
-        echo "Weekly backup report: Database backup completed successfully on \$(hostname) at \$(date)" | mail -s "Weekly Backup Report - \$APP_NAME" "\$EMAIL"
-    fi
-else
-    echo "Database backup failed" | mail -s "Database Backup Failed - \$APP_NAME" "\$EMAIL"
-fi
-EOF
-
-sudo cp /tmp/db_backup.sh /opt/monitoring/$APP_NAME/
-sudo chmod +x /opt/monitoring/$APP_NAME/db_backup.sh
-rm /tmp/db_backup.sh
-
-# Create backup cron job (daily at 2 AM)
-print_status "Setting up database backup cron job..."
-(crontab -l 2>/dev/null; echo "0 2 * * * /opt/monitoring/$APP_NAME/db_backup.sh") | crontab -
-
-# =============================================================================
-# AUTO-SCALING SETUP
-# =============================================================================
-
-print_header "Setting up Auto-Scaling System"
-
-print_status "Creating auto-scaling script..."
-sudo tee /opt/monitoring/$APP_NAME/auto_scale.py > /dev/null << EOF
-#!/usr/bin/env python3
-import psutil
-import subprocess
-import time
-import json
-from datetime import datetime
-
-APP_NAME = "$APP_NAME"
-EMAIL = "chris@yelegroup.africa"
-PROJECT_PATH = "$PROJECT_PATH"
-
-# Scaling thresholds
-SCALE_UP_CPU = 70
-SCALE_DOWN_CPU = 30
-SCALE_UP_MEMORY = 70
-SCALE_DOWN_MEMORY = 30
-MIN_WORKERS = 2
-MAX_WORKERS = 8
-
-def send_notification(subject, message):
-    try:
-        subprocess.run([
-            'mail', '-s', subject, EMAIL
-        ], input=message, text=True, check=True)
-    except:
-        subprocess.run([
-            'logger', f'AUTO_SCALE: {subject} - {message}'
-        ])
-
-def get_gunicorn_workers():
-    try:
-        with open(f'{PROJECT_PATH}/gunicorn.conf.py', 'r') as f:
-            content = f.read()
-            for line in content.split('\n'):
-                if line.strip().startswith('workers = '):
-                    return int(line.split('=')[1].strip())
-    except:
-        return 3  # default
-
-def update_gunicorn_workers(new_workers):
-    try:
-        with open(f'{PROJECT_PATH}/gunicorn.conf.py', 'r') as f:
-            content = f.read()
-        
-        lines = []
-        for line in content.split('\n'):
-            if line.strip().startswith('workers = '):
-                lines.append(f'workers = {new_workers}')
-            else:
-                lines.append(line)
-        
-        with open(f'{PROJECT_PATH}/gunicorn.conf.py', 'w') as f:
-            f.write('\n'.join(lines))
-        
-        # Restart gunicorn
-        subprocess.run(['sudo', 'systemctl', 'restart', f'gunicorn-{APP_NAME}.service'])
-        return True
-    except:
-        return False
-
-def auto_scale():
-    current_workers = get_gunicorn_workers()
-    cpu_percent = psutil.cpu_percent(interval=30)  # 30 second average
-    memory_percent = psutil.virtual_memory().percent
-    
-    new_workers = current_workers
-    action = None
-    
-    # Scale up conditions
-    if (cpu_percent > SCALE_UP_CPU or memory_percent > SCALE_UP_MEMORY) and current_workers < MAX_WORKERS:
-        new_workers = min(current_workers + 1, MAX_WORKERS)
-        action = "scale_up"
-    
-    # Scale down conditions
-    elif (cpu_percent < SCALE_DOWN_CPU and memory_percent < SCALE_DOWN_MEMORY) and current_workers > MIN_WORKERS:
-        new_workers = max(current_workers - 1, MIN_WORKERS)
-        action = "scale_down"
-    
-    if new_workers != current_workers and action:
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        hostname = subprocess.run(['hostname'], capture_output=True, text=True).stdout.strip()
-        
-        if update_gunicorn_workers(new_workers):
-            subject = f"Auto-Scaling Event - {APP_NAME}"
-            message = f"""
-Auto-scaling event at {timestamp} on server {hostname}
-
-Action: {action.replace('_', ' ').title()}
-Workers: {current_workers} → {new_workers}
-
-Metrics:
-• CPU: {cpu_percent:.1f}%
-• Memory: {memory_percent:.1f}%
-
-Gunicorn service has been restarted with new worker count.
-            """
-            send_notification(subject, message)
-        else:
-            subject = f"Auto-Scaling Failed - {APP_NAME}"
-            message = f"Failed to update worker count from {current_workers} to {new_workers} at {timestamp}"
-            send_notification(subject, message)
-
-if __name__ == '__main__':
-    auto_scale()
-EOF
-
-sudo chmod +x /opt/monitoring/$APP_NAME/auto_scale.py
-
-# Create auto-scaling cron job (every 15 minutes)
-print_status "Setting up auto-scaling cron job..."
-(crontab -l 2>/dev/null; echo "*/15 * * * * /opt/monitoring/$APP_NAME/auto_scale.py") | crontab -
-
-# =============================================================================
-# ROLLBACK SYSTEM SETUP
-# =============================================================================
-
-print_header "Setting up Automatic Rollback System"
-
-print_status "Creating rollback system..."
-sudo mkdir -p /opt/monitoring/$APP_NAME/rollback_snapshots
-
-sudo tee /opt/monitoring/$APP_NAME/rollback_manager.py > /dev/null << EOF
-#!/usr/bin/env python3
-import os
-import shutil
-import subprocess
-import json
-import time
-from datetime import datetime
-
-APP_NAME = "$APP_NAME"
-PROJECT_PATH = "$PROJECT_PATH"
-DB_NAME = "$DB_NAME"
-DB_PASSWORD = "$DB_PASSWORD"
-EMAIL = "chris@yelegroup.africa"
-SNAPSHOT_DIR = f"/opt/monitoring/{APP_NAME}/rollback_snapshots"
-
-def send_notification(subject, message):
-    try:
-        subprocess.run(['mail', '-s', subject, EMAIL], input=message, text=True, check=True)
-    except:
-        subprocess.run(['logger', f'ROLLBACK: {subject} - {message}'])
-
-def create_deployment_snapshot():
-    """Create a snapshot before deployment"""
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    snapshot_path = f"{SNAPSHOT_DIR}/snapshot_{timestamp}"
-    
-    try:
-        os.makedirs(snapshot_path, exist_ok=True)
-        
-        # Save current configuration
-        config_data = {
-            'timestamp': timestamp,
-            'git_commit': subprocess.run(['git', 'rev-parse', 'HEAD'], 
-                                       cwd=PROJECT_PATH, capture_output=True, text=True).stdout.strip(),
-            'gunicorn_config': open(f'{PROJECT_PATH}/gunicorn.conf.py').read(),
-            'env_file': open(f'{PROJECT_PATH}/.env').read()
-        }
-        
-        with open(f'{snapshot_path}/config.json', 'w') as f:
-            json.dump(config_data, f, indent=2)
-        
-        # Backup database
-        os.environ['PGPASSWORD'] = DB_PASSWORD
-        subprocess.run([
-            'pg_dump', '-h', 'localhost', '-U', 'postgres', '-d', DB_NAME,
-            '-f', f'{snapshot_path}/database.sql'
-        ], check=True)
-        
-        # Copy critical files
-        shutil.copy2(f'{PROJECT_PATH}/gunicorn.conf.py', snapshot_path)
-        shutil.copy2(f'{PROJECT_PATH}/.env', snapshot_path)
-        
-        # Keep only last 5 snapshots
-        snapshots = sorted([d for d in os.listdir(SNAPSHOT_DIR) if d.startswith('snapshot_')])
-        for old_snapshot in snapshots[:-5]:
-            shutil.rmtree(f"{SNAPSHOT_DIR}/{old_snapshot}")
-        
-        return timestamp
-    except Exception as e:
-        send_notification(f"Snapshot Creation Failed - {APP_NAME}", f"Error: {str(e)}")
-        return None
-
-def check_deployment_health():
-    """Check if deployment is healthy"""
-    try:
-        # Check if gunicorn service is running
-        result = subprocess.run(['systemctl', 'is-active', f'gunicorn-{APP_NAME}.service'], 
-                              capture_output=True, text=True)
-        if result.stdout.strip() != 'active':
-            return False, "Gunicorn service not active"
-        
-        # Check if socket exists
-        if not os.path.exists(f'/run/gunicorn/gunicorn-{APP_NAME}.sock'):
-            return False, "Gunicorn socket not found"
-        
-        # Test HTTP response (with timeout)
-        test_result = subprocess.run([
-            'curl', '-s', '-o', '/dev/null', '-w', '%{http_code}',
-            '--max-time', '10', '--unix-socket', 
-            f'/run/gunicorn/gunicorn-{APP_NAME}.sock', 
-            'http://localhost/'
-        ], capture_output=True, text=True)
-        
-        if test_result.returncode != 0 or not test_result.stdout.strip().startswith(('2', '3')):
-            return False, f"HTTP test failed: {test_result.stdout}"
-        
-        return True, "All checks passed"
-    except Exception as e:
-        return False, f"Health check error: {str(e)}"
-
-def rollback_to_snapshot(snapshot_timestamp):
-    """Rollback to a specific snapshot"""
-    snapshot_path = f"{SNAPSHOT_DIR}/snapshot_{snapshot_timestamp}"
-    
-    if not os.path.exists(snapshot_path):
-        return False, "Snapshot not found"
-    
-    try:
-        # Load snapshot config
-        with open(f'{snapshot_path}/config.json', 'r') as f:
-            config = json.load(f)
-        
-        # Stop services
-        subprocess.run(['sudo', 'systemctl', 'stop', f'gunicorn-{APP_NAME}.service'])
-        
-        # Restore database
-        os.environ['PGPASSWORD'] = DB_PASSWORD
-        subprocess.run(['dropdb', '-h', 'localhost', '-U', 'postgres', DB_NAME], check=False)
-        subprocess.run(['createdb', '-h', 'localhost', '-U', 'postgres', DB_NAME], check=True)
-        subprocess.run([
-            'psql', '-h', 'localhost', '-U', 'postgres', '-d', DB_NAME,
-            '-f', f'{snapshot_path}/database.sql'
-        ], check=True)
-        
-        # Restore configuration files
-        shutil.copy2(f'{snapshot_path}/gunicorn.conf.py', PROJECT_PATH)
-        shutil.copy2(f'{snapshot_path}/.env', PROJECT_PATH)
-        
-        # Checkout git commit if available
-        if config.get('git_commit'):
-            subprocess.run(['git', 'checkout', config['git_commit']], cwd=PROJECT_PATH)
-        
-        # Restart services
-        subprocess.run(['sudo', 'systemctl', 'start', f'gunicorn-{APP_NAME}.service'])
-        
-        # Wait and verify
-        time.sleep(10)
-        health_ok, health_msg = check_deployment_health()
-        
-        if health_ok:
-            return True, f"Rollback successful to snapshot {snapshot_timestamp}"
-        else:
-            return False, f"Rollback completed but health check failed: {health_msg}"
-            
-    except Exception as e:
-        return False, f"Rollback failed: {str(e)}"
-
-def auto_rollback_on_failure():
-    """Automatically rollback if deployment fails"""
-    health_ok, health_msg = check_deployment_health()
-    
-    if not health_ok:
-        # Get latest snapshot
-        snapshots = sorted([d for d in os.listdir(SNAPSHOT_DIR) if d.startswith('snapshot_')])
-        if snapshots:
-            latest_snapshot = snapshots[-1].replace('snapshot_', '')
-            success, msg = rollback_to_snapshot(latest_snapshot)
-            
-            notification_msg = f"""
-Automatic rollback triggered due to deployment failure.
-
-Original issue: {health_msg}
-Rollback result: {msg}
-Snapshot used: {latest_snapshot}
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Server: {subprocess.run(['hostname'], capture_output=True, text=True).stdout.strip()}
-            """
-            
-            subject = f"Auto-Rollback {'Successful' if success else 'Failed'} - {APP_NAME}"
-            send_notification(subject, notification_msg)
-        else:
-            send_notification(f"Auto-Rollback Failed - {APP_NAME}", 
-                            "No snapshots available for rollback")
-
-if __name__ == '__main__':
-    import sys
-    if len(sys.argv) > 1:
-        if sys.argv[1] == 'snapshot':
-            snapshot_id = create_deployment_snapshot()
-            print(f"Snapshot created: {snapshot_id}")
-        elif sys.argv[1] == 'check':
-            auto_rollback_on_failure()
-        elif sys.argv[1] == 'rollback' and len(sys.argv) > 2:
-            success, msg = rollback_to_snapshot(sys.argv[2])
-            print(msg)
-    else:
-        auto_rollback_on_failure()
-EOF
-
-sudo chmod +x /opt/monitoring/$APP_NAME/rollback_manager.py
-
-# Create rollback check cron job (every 5 minutes)
-print_status "Setting up rollback monitoring cron job..."
-(crontab -l 2>/dev/null; echo "*/5 * * * * /opt/monitoring/$APP_NAME/rollback_manager.py check") | crontab -
-
-# =============================================================================
 # NGINX CONFIGURATION FOR BACKEND
 # =============================================================================
 
@@ -1124,19 +509,6 @@ server {
     # Logging
     access_log /var/log/nginx/$APP_NAME.access.log;
     error_log /var/log/nginx/$APP_NAME.error.log;
-    
-    # Health check endpoint
-    location /health/ {
-        access_log off;
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_pass http://unix:/run/gunicorn/gunicorn-$APP_NAME.sock;
-        proxy_read_timeout 30s;
-        proxy_connect_timeout 30s;
-        proxy_redirect off;
-    }
     
     # Static files (served directly by nginx)
     location /static/ {
@@ -1229,10 +601,6 @@ sudo chown -R ubuntu:ubuntu $PROJECT_PATH
 sudo chmod -R 755 $PROJECT_PATH
 sudo chmod 644 $PROJECT_PATH/.env
 
-# Set monitoring directory permissions
-sudo chown -R ubuntu:ubuntu /opt/monitoring/$APP_NAME
-sudo chown -R ubuntu:ubuntu /opt/backups/$APP_NAME
-
 # Add ubuntu to www-data group
 sudo usermod -a -G www-data ubuntu
 
@@ -1253,9 +621,6 @@ sudo ufw --force enable
 # =============================================================================
 
 print_header "Starting Backend Services"
-
-print_status "Creating initial deployment snapshot..."
-/opt/monitoring/$APP_NAME/rollback_manager.py snapshot
 
 print_status "Reloading systemd daemon..."
 sudo systemctl daemon-reload
@@ -1409,19 +774,6 @@ server {
     root /var/www/$FRONTEND_DOMAIN;
     index index.html;
     
-    # Health check endpoint proxy
-    location /health/ {
-        access_log off;
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_pass http://unix:/run/gunicorn/gunicorn-$APP_NAME.sock;
-        proxy_read_timeout 30s;
-        proxy_connect_timeout 30s;
-        proxy_redirect off;
-    }
-    
     # Backend API proxy - proxy ALL backend routes
     location ~ ^/(admin|api|docs|swagger|auth|accounts|yele-docs)/ {
         proxy_set_header Host \$http_host;
@@ -1550,7 +902,7 @@ print_header "Creating Deployment Utilities"
 print_status "Creating deployment update script..."
 cat > /tmp/deploy_update.sh << 'EOF'
 #!/bin/bash
-# Auto-update deployment script with rollback support
+# Auto-update deployment script
 
 APP_NAME="APP_NAME_PLACEHOLDER"
 PROJECT_PATH="PROJECT_PATH_PLACEHOLDER"
@@ -1559,9 +911,6 @@ FRONTEND_PATH="FRONTEND_PATH_PLACEHOLDER"
 FRONTEND_DOMAIN="FRONTEND_DOMAIN_PLACEHOLDER"
 
 cd "$PROJECT_PATH"
-
-echo "Creating pre-deployment snapshot..."
-/opt/monitoring/$APP_NAME/rollback_manager.py snapshot
 
 echo "Pulling latest changes..."
 git pull origin main
@@ -1580,18 +929,6 @@ python manage.py collectstatic --noinput
 
 echo "Restarting services..."
 sudo systemctl restart gunicorn-$APP_NAME.service
-
-echo "Waiting for service to start..."
-sleep 10
-
-echo "Checking deployment health..."
-if /opt/monitoring/$APP_NAME/rollback_manager.py check; then
-    echo "✓ Deployment successful!"
-    # Send success notification
-    echo "Deployment update completed successfully for $APP_NAME on $(hostname) at $(date)" | mail -s "Deployment Success - $APP_NAME" chris@yelegroup.africa
-else
-    echo "✗ Deployment failed - automatic rollback will be triggered"
-fi
 
 echo "Backend deployment update completed!"
 
@@ -1659,117 +996,6 @@ cp /tmp/monitor_logs.sh "$PROJECT_PATH/"
 chmod +x "$PROJECT_PATH/monitor_logs.sh"
 rm /tmp/monitor_logs.sh
 
-# Create management utilities
-print_status "Creating management utilities..."
-cat > /tmp/manage_app.sh << 'EOF'
-#!/bin/bash
-# Application management utility
-
-APP_NAME="APP_NAME_PLACEHOLDER"
-PROJECT_PATH="PROJECT_PATH_PLACEHOLDER"
-
-show_help() {
-    echo "Django Application Management Utility"
-    echo ""
-    echo "Usage: $0 [command]"
-    echo ""
-    echo "Commands:"
-    echo "  status        - Show service status"
-    echo "  restart       - Restart all services"
-    echo "  logs          - Show recent logs"
-    echo "  health        - Run health check"
-    echo "  backup        - Create manual backup"
-    echo "  scale [num]   - Set number of workers"
-    echo "  rollback [id] - Rollback to snapshot"
-    echo "  snapshots     - List available snapshots"
-    echo "  monitor       - Monitor performance metrics"
-    echo ""
-}
-
-case "$1" in
-    status)
-        echo "=== Service Status ==="
-        echo "Gunicorn: $(sudo systemctl is-active gunicorn-$APP_NAME.service)"
-        echo "Nginx: $(sudo systemctl is-active nginx)"
-        echo "PostgreSQL: $(sudo systemctl is-active postgresql)"
-        echo ""
-        echo "=== Socket Status ==="
-        if [ -S "/run/gunicorn/gunicorn-$APP_NAME.sock" ]; then
-            echo "✓ Gunicorn socket exists"
-        else
-            echo "✗ Gunicorn socket missing"
-        fi
-        ;;
-    restart)
-        echo "Restarting services..."
-        sudo systemctl restart gunicorn-$APP_NAME.service
-        sudo systemctl restart nginx
-        echo "Services restarted"
-        ;;
-    logs)
-        echo "=== Recent Gunicorn Logs ==="
-        sudo journalctl -u gunicorn-$APP_NAME.service -n 20 --no-pager
-        echo ""
-        echo "=== Recent Nginx Error Logs ==="
-        sudo tail -n 20 /var/log/nginx/$APP_NAME.error.log
-        ;;
-    health)
-        echo "Running health check..."
-        /opt/monitoring/$APP_NAME/health_check.py
-        echo "Health check completed"
-        ;;
-    backup)
-        echo "Creating manual backup..."
-        /opt/monitoring/$APP_NAME/db_backup.sh
-        echo "Backup completed"
-        ;;
-    scale)
-        if [ -z "$2" ]; then
-            echo "Please specify number of workers"
-            exit 1
-        fi
-        echo "Scaling to $2 workers..."
-        cd "$PROJECT_PATH"
-        sed -i "s/workers = .*/workers = $2/" gunicorn.conf.py
-        sudo systemctl restart gunicorn-$APP_NAME.service
-        echo "Scaled to $2 workers"
-        ;;
-    rollback)
-        if [ -z "$2" ]; then
-            echo "Available snapshots:"
-            ls -la /opt/monitoring/$APP_NAME/rollback_snapshots/ | grep snapshot_
-            exit 1
-        fi
-        echo "Rolling back to snapshot $2..."
-        /opt/monitoring/$APP_NAME/rollback_manager.py rollback "$2"
-        ;;
-    snapshots)
-        echo "Available snapshots:"
-        ls -la /opt/monitoring/$APP_NAME/rollback_snapshots/ | grep snapshot_
-        ;;
-    monitor)
-        echo "=== Current Performance ==="
-        echo "CPU: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)%"
-        echo "Memory: $(free | grep Mem | awk '{printf "%.1f%%", $3/$2 * 100.0}')"
-        echo "Disk: $(df / | tail -1 | awk '{print $5}')"
-        echo "Load: $(uptime | awk -F'load average:' '{print $2}')"
-        echo ""
-        echo "=== Gunicorn Processes ==="
-        ps aux | grep gunicorn | grep $APP_NAME
-        ;;
-    *)
-        show_help
-        ;;
-esac
-EOF
-
-sed -i "s|APP_NAME_PLACEHOLDER|$APP_NAME|g" /tmp/manage_app.sh
-sed -i "s|PROJECT_PATH_PLACEHOLDER|$PROJECT_PATH|g" /tmp/manage_app.sh
-
-cp /tmp/manage_app.sh "$PROJECT_PATH/"
-chmod +x "$PROJECT_PATH/manage_app.sh"
-rm /tmp/manage_app.sh
-
 # =============================================================================
 # DEPLOYMENT SUMMARY
 # =============================================================================
@@ -1777,13 +1003,10 @@ rm /tmp/manage_app.sh
 # Disable the trap before successful completion
 trap - EXIT
 
-print_header "Advanced Deployment Complete!"
-
-# Send success notification
-send_notification "Django Deployment Successful - $APP_NAME" "Django application '$APP_NAME' has been successfully deployed on server $(hostname) at $(date). All monitoring systems are active."
+print_header "Deployment Complete!"
 
 echo ""
-echo "🎉 Your Django application has been successfully deployed with advanced features!"
+echo "🎉 Your Django application has been successfully deployed!"
 echo ""
 echo "📋 Backend Deployment Summary:"
 echo "   • App Name: $APP_NAME"
@@ -1791,7 +1014,6 @@ echo "   • Domain: https://$DOMAIN_NAME"
 echo "   • Project Path: $PROJECT_PATH"
 echo "   • Database: $DB_NAME"
 echo "   • Swagger Docs: https://$DOMAIN_NAME/yele-docs"
-echo "   • Health Check: https://$DOMAIN_NAME/health/"
 echo ""
 
 if [ "$FRONTEND_DEPLOYED" = true ]; then
@@ -1800,30 +1022,15 @@ if [ "$FRONTEND_DEPLOYED" = true ]; then
     echo "   • Frontend Path: /var/www/$FRONTEND_DOMAIN"
     echo "   • Frontend Config: $FRONTEND_APP_NAME"
     echo "   • API Access: https://$FRONTEND_DOMAIN/yele-docs"
-    echo "   • Health Check: https://$FRONTEND_DOMAIN/health/"
     echo ""
 fi
 
-echo "🔧 Advanced Features Enabled:"
-echo "   • Health Monitoring (every 5 minutes)"
-echo "   • Performance Monitoring (every 10 minutes)"
-echo "   • Auto-Scaling (every 15 minutes, 2-8 workers)"
-echo "   • Database Backups (daily at 2 AM)"
-echo "   • Automatic Rollback (on deployment failure)"
-echo "   • Email Notifications (chris@yelegroup.africa)"
-echo ""
-
 echo "🔧 Service Management Commands:"
-echo "   • App Management: cd $PROJECT_PATH && ./manage_app.sh [command]"
 echo "   • Restart Backend: sudo systemctl restart gunicorn-$APP_NAME.service"
 echo "   • View Backend Logs: sudo journalctl -u gunicorn-$APP_NAME.service -f"
 echo "   • Monitor Requests: cd $PROJECT_PATH && ./monitor_logs.sh"
 echo "   • Update Deployment: cd $PROJECT_PATH && ./deploy_update.sh"
-echo "   • Manual Health Check: /opt/monitoring/$APP_NAME/health_check.py"
-echo "   • Manual Backup: /opt/monitoring/$APP_NAME/db_backup.sh"
-echo "   • Create Snapshot: /opt/monitoring/$APP_NAME/rollback_manager.py snapshot"
 echo ""
-
 echo "📁 Important Files Created:"
 echo "   • Gunicorn Service: /etc/systemd/system/gunicorn-$APP_NAME.service"
 echo "   • Backend Nginx Config: /etc/nginx/sites-available/$APP_NAME"
@@ -1832,8 +1039,6 @@ if [ "$FRONTEND_DEPLOYED" = true ]; then
     echo "   • Frontend Nginx Config: /etc/nginx/sites-available/$FRONTEND_APP_NAME"
 fi
 
-echo "   • Monitoring Scripts: /opt/monitoring/$APP_NAME/"
-echo "   • Backup Directory: /opt/backups/$APP_NAME/"
 echo "   • App Logs: /var/log/gunicorn/$APP_NAME-*.log"
 echo "   • Nginx Logs: /var/log/nginx/$APP_NAME.*.log"
 
@@ -1846,47 +1051,48 @@ echo "🔗 Quick Tests:"
 echo "   • Backend API: https://$DOMAIN_NAME"
 echo "   • Admin Panel: https://$DOMAIN_NAME/admin/"
 echo "   • API Documentation: https://$DOMAIN_NAME/yele-docs"
-echo "   • Health Check: https://$DOMAIN_NAME/health/"
 
 if [ "$FRONTEND_DEPLOYED" = true ]; then
     echo "   • Frontend App: https://$FRONTEND_DOMAIN"
     echo "   • API from Frontend: https://$FRONTEND_DOMAIN/yele-docs"
-    echo "   • Frontend Health Check: https://$FRONTEND_DOMAIN/health/"
 fi
 
 echo ""
 echo "📝 Next Steps:"
 echo "   1. Create Django superuser: cd $PROJECT_PATH && source venv/bin/activate && python manage.py createsuperuser"
-echo "   2. Test all endpoints including /yele-docs and /health/"
+echo "   2. Test all endpoints including /yele-docs"
 echo "   3. Verify SSL certificates are working"
-echo "   4. Check monitoring email notifications"
-echo "   5. Test automatic scaling and rollback features"
+echo "   4. Update your environment variables if needed"
 
 if [ "$FRONTEND_DEPLOYED" = true ]; then
-    echo "   6. Test API connectivity from frontend"
-    echo "   7. Verify React routing works correctly"
+    echo "   5. Test API connectivity from frontend"
+    echo "   6. Verify React routing works correctly"
 fi
 
 echo ""
 
 print_warning "Important Notes:"
-print_warning "• Health checks run every 5 minutes with email alerts"
-print_warning "• Performance monitoring runs every 10 minutes"
-print_warning "• Auto-scaling adjusts workers every 15 minutes (2-8 workers)"
-print_warning "• Database backups run daily at 2 AM with 7-day retention"
-print_warning "• Automatic rollback triggers on deployment failures"
-print_warning "• All alerts are sent to chris@yelegroup.africa"
+print_warning "• The script does not modify your repository code"
+print_warning "• All necessary configurations are done in system files only"
+print_warning "• Your /yele-docs route should work if properly configured in your Django app"
+print_warning "• SSL certificates are automatically configured"
+
+if [ "$FRONTEND_DEPLOYED" = true ]; then
+    print_warning "• Frontend proxies backend routes including /yele-docs"
+fi
 
 echo ""
-echo "🚨 Advanced Troubleshooting Commands:"
-echo "   • Check all services: cd $PROJECT_PATH && ./manage_app.sh status"
-echo "   • View detailed logs: cd $PROJECT_PATH && ./manage_app.sh logs"
-echo "   • Run health check: cd $PROJECT_PATH && ./manage_app.sh health"
-echo "   • Monitor performance: cd $PROJECT_PATH && ./manage_app.sh monitor"
-echo "   • List snapshots: cd $PROJECT_PATH && ./manage_app.sh snapshots"
-echo "   • Manual rollback: cd $PROJECT_PATH && ./manage_app.sh rollback [snapshot_id]"
-echo "   • Scale workers: cd $PROJECT_PATH && ./manage_app.sh scale [number]"
-echo "   • Check cron jobs: crontab -l"
-echo "   • Test email: echo 'Test' | mail -s 'Test Subject' chris@yelegroup.africa"
+echo "🚨 Troubleshooting Commands:"
+echo "   • Check backend status: sudo systemctl status gunicorn-$APP_NAME.service"
+echo "   • Check nginx status: sudo systemctl status nginx"
+echo "   • Check backend logs: sudo journalctl -u gunicorn-$APP_NAME.service -n 50"
+echo "   • Check nginx error logs: sudo tail -f /var/log/nginx/$APP_NAME.error.log"
+
+if [ "$FRONTEND_DEPLOYED" = true ]; then
+    echo "   • Check frontend logs: sudo tail -f /var/log/nginx/$FRONTEND_APP_NAME.error.log"
+fi
+
+echo "   • Test socket connection: curl --unix-socket /run/gunicorn/gunicorn-$APP_NAME.sock http://localhost/"
+echo "   • Test /yele-docs: curl -I https://$DOMAIN_NAME/yele-docs"
 echo ""
-print_status "Advanced Django deployment script completed successfully! 🚀"
+print_status "Deployment script completed successfully! 🚀"
